@@ -47,6 +47,17 @@ fn mach_task_self() callconv(.C) mach_port_t {
     return mach_task_self_;
 }
 
+const vm_map_t = mach_port_t;
+const mach_vm_address_t = usize;
+const vm_offset_t = usize;
+const mach_msg_type_number_t = natural_t;
+extern "c" fn mach_vm_write(
+    target_task: vm_map_t,
+    address: mach_vm_address_t,
+    data: vm_offset_t,
+    data_cnt: mach_msg_type_number_t,
+) kern_return_t;
+
 const errno = std.c.getErrno;
 
 var gpa_alloc = std.heap.GeneralPurposeAllocator(.{}){};
@@ -99,13 +110,37 @@ pub fn main() anyerror!void {
 
     log.info("pid = {d}", .{pid});
 
-    // const pid_res = os.waitpid(pid, 0);
-    // log.info("pid_res = {}", .{pid_res});
+    const stderr = std.io.getStdErr().writer();
+    const stdin = std.io.getStdIn().reader();
+    var repl_buf: [4096]u8 = undefined;
 
-    var port: mach_port_name_t = undefined;
-    var kern_res = task_for_pid(mach_task_self(), pid, &port);
-    if (kern_res != 0) {
-        return error.TaskForPidFailed;
+    while (true) {
+        try stderr.print("\nOverwrite address 0x100052030, thus stopping the process?", .{});
+        if (stdin.readUntilDelimiterOrEof(&repl_buf, '\n') catch |err| {
+            try stderr.print("\nunable to parse command: {s}\n", .{@errorName(err)});
+            continue;
+        }) |_| {
+            var port: mach_port_name_t = undefined;
+            var kern_res = task_for_pid(mach_task_self(), pid, &port);
+            if (kern_res != 0) {
+                return error.TaskForPidFailed;
+            }
+            log.info("kern_res = {}, port = {}", .{ kern_res, port });
+
+            const address: mach_vm_address_t = 0x100052030;
+            const swap_addr: u64 = 0x100001082;
+            var buf: [@sizeOf(u64)]u8 = undefined;
+            mem.writeIntLittle(u64, &buf, swap_addr);
+            kern_res = mach_vm_write(port, address, @ptrToInt(&buf), buf.len);
+            if (kern_res != 0) {
+                return error.MachVMWriteFailed;
+            }
+            log.info("kern_res = {}", .{kern_res});
+
+            const pid_res = os.waitpid(pid, 0);
+            log.info("pid_res = {}", .{pid_res});
+
+            break;
+        }
     }
-    log.info("kern_res = {}, port = {}", .{ kern_res, port });
 }
