@@ -30,6 +30,23 @@ const POSIX_SPAWN_SETSID: c_int = 0x0400;
 const _POSIX_SPAWN_RESLIDE: c_int = 0x0800;
 const POSIX_SPAWN_CLOEXEC_DEFAULT: c_int = 0x4000;
 
+const MACH_MSG_TYPE_PORT_NAME = 15;
+
+const kern_return_t = c_int;
+const __darwin_natural_t = c_uint;
+const __darwin_mach_port_name_t = __darwin_natural_t;
+const __darwin_mach_port_t = __darwin_mach_port_name_t;
+const natural_t = __darwin_natural_t;
+const mach_port_name_t = natural_t;
+const mach_port_t = __darwin_mach_port_t;
+
+extern "c" var mach_task_self_: mach_port_t;
+extern "c" fn task_for_pid(target_tport: mach_port_name_t, pid: os.pid_t, t: *mach_port_name_t) kern_return_t;
+
+fn mach_task_self() callconv(.C) mach_port_t {
+    return mach_task_self_;
+}
+
 const errno = std.c.getErrno;
 
 var gpa_alloc = std.heap.GeneralPurposeAllocator(.{}){};
@@ -82,6 +99,13 @@ pub fn main() anyerror!void {
 
     log.info("pid = {d}", .{pid});
 
-    const pid_res = os.waitpid(pid, 0);
-    log.info("pid_res = {}", .{pid_res});
+    // const pid_res = os.waitpid(pid, 0);
+    // log.info("pid_res = {}", .{pid_res});
+
+    var port: mach_port_name_t = undefined;
+    var kern_res = task_for_pid(mach_task_self(), pid, &port);
+    if (kern_res != 0) {
+        return error.TaskForPidFailed;
+    }
+    log.info("kern_res = {}, port = {}", .{ kern_res, port });
 }
