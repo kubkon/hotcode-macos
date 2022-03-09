@@ -7,18 +7,16 @@ Some preliminary results:
 Given input Zig file `hello.zig`
 
 ```zig
-extern "c" fn write(usize, usize, usize) c_int;
+fn ok() bool {
+    return true;
+}
 
-fn foo() void {
-    _ = write(1, @ptrToInt("Hello"), 5);
+export fn fail() bool {
+    return false;
 }
 
 pub fn main() void {
-    assertAslr(@ptrToInt(&foo));
-}
-
-fn assertAslr(ptr: usize) void {
-    if (ptr != 0x1000010D7) unreachable;
+    while (ok()) {}
 }
 ```
 
@@ -28,24 +26,34 @@ We compile it with self-hosted (stage2) compiler
 $ zig-stage2 build-exe hello.zig -target x86_64-macos
 ```
 
-Then, we spawn the executable using `posix_spawnp` first with ASLR on
+Then, we spawn the executable using `posix_spawnp` with ASLR off.
 
 ```
-$ zig build run -- ./hello
+$ sudo zig build run -- ./hello --aslr-off
+Password:
 info: Init...
-info: attr = posix_spawnattr_t@600001948000
+info: attr = posix_spawnattr_t@600003130000
 info: Setting flags...
-info: pid = 82148
-info: pid_res = WaitPidResult{ .pid = 82148, .status = 5 }
+info: pid = 87803
+
+Overwrite address 0x100052030, thus stopping the process?
 ```
 
-And with ASLR off
+The program is running under some assigned PID in an endless loop, until
+we hit Enter and overwrite a cell in GOT at a hard-coded address of `0x100052030`
+to point to function `fn fail()` which will terminate the loop in `hello` and thus
+terminate the process. We monitor the output status exit code too.
 
 ```
-$ zig build run -- ./hello --aslr-off
+$ sudo zig build run -- ./hello --aslr-off
+Password:
 info: Init...
-info: attr = posix_spawnattr_t@600000a9c000
+info: attr = posix_spawnattr_t@600003130000
 info: Setting flags...
-info: pid = 82159
-info: pid_res = WaitPidResult{ .pid = 82159, .status = 0 }
+info: pid = 87803
+
+Overwrite address 0x100052030, thus stopping the process?
+info: kern_res = 0, port = 4867
+info: kern_res = 0
+info: pid_res = WaitPidResult{ .pid = 87803, .status = 0 }
 ```
