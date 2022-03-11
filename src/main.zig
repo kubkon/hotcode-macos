@@ -10,6 +10,32 @@ const task_info_t = *integer_t;
 const task_name_t = c.mach_port_name_t;
 const vm_address_t = c.vm_offset_t;
 const vm_size_t = c.mach_vm_size_t;
+const vm_machine_attribute_t = usize;
+const vm_machine_attribute_val_t = isize;
+
+/// Cachability
+const MATTR_CACHE = 1;
+/// Migrability
+const MATTR_MIGRATE = 2;
+/// Replicability
+const MATTR_REPLICATE = 4;
+
+/// (Generic) turn attribute off
+const MATTR_VAL_OFF = 0;
+/// (Generic) turn attribute on
+const MATTR_VAL_ON = 1;
+/// (Generic) return current value
+const MATTR_VAL_GET = 2;
+/// Flush from all caches
+const MATTR_VAL_CACHE_FLUSH = 6;
+/// Flush from data caches
+const MATTR_VAL_DCACHE_FLUSH = 7;
+/// Flush from instruction caches
+const MATTR_VAL_ICACHE_FLUSH = 8;
+/// Sync I+D caches
+const MATTR_VAL_CACHE_SYNC = 9;
+/// Get page info (stats)
+const MATTR_VAL_GET_INFO = 10;
 
 const TASK_VM_INFO = 22;
 const TASK_VM_INFO_COUNT: c.mach_msg_type_number_t = @sizeOf(task_vm_info_data_t) / @sizeOf(c.natural_t);
@@ -86,6 +112,13 @@ extern "c" fn task_info(
 ) c.kern_return_t;
 extern "c" fn _host_page_size(task: c.mach_port_t, size: *vm_size_t) c.kern_return_t;
 extern "c" fn vm_deallocate(target_task: c.vm_map_t, address: vm_address_t, size: vm_size_t) c.kern_return_t;
+extern "c" fn vm_machine_attribute(
+    target_task: c.vm_map_t,
+    address: vm_address_t,
+    size: vm_size_t,
+    attribute: vm_machine_attribute_t,
+    value: *vm_machine_attribute_val_t,
+) c.kern_return_t;
 
 const errno = c.getErrno;
 
@@ -167,11 +200,8 @@ pub fn main() anyerror!void {
             const swap_addr: u64 = 0x100001082;
             var tbuf: [8]u8 = undefined;
             mem.writeIntLittle(u64, &tbuf, swap_addr);
-            kern_res = c.mach_vm_write(port, address, @ptrToInt(&tbuf), 8);
-            if (kern_res != 0) {
-                return error.MachVMWriteFailed;
-            }
-            log.info("kern_res = {}", .{kern_res});
+            const nwritten = try vmWrite(port, address, &tbuf, tbuf.len, .x86_64);
+            log.info("nwritten = {d}", .{nwritten});
 
             const pid_res = os.waitpid(pid, 0);
             log.info("pid_res = {}", .{pid_res});
@@ -179,6 +209,46 @@ pub fn main() anyerror!void {
             break;
         }
     }
+}
+
+fn vmWrite(task: c.mach_port_name_t, address: u64, buf: []const u8, count: usize, arch: std.Target.Cpu.Arch) !usize {
+    var total_written: usize = 0;
+    var curr_addr = address;
+    const page_size = try pageSize(task);
+    var out_buf = buf[0..];
+
+    while (total_written < count) {
+        const curr_size = maxBytesLeftInPage(page_size, curr_addr, count - total_written);
+        var kern_res = c.mach_vm_write(
+            task,
+            curr_addr,
+            @ptrToInt(out_buf.ptr),
+            @intCast(c.mach_msg_type_number_t, curr_size),
+        );
+        if (kern_res != 0) {
+            log.err("mach_vm_write failed with error: {d}", .{kern_res});
+            return error.MachVmWriteFailed;
+        }
+
+        switch (arch) {
+            .aarch64 => {
+                var mattr_value: vm_machine_attribute_val_t = MATTR_VAL_CACHE_FLUSH;
+                kern_res = vm_machine_attribute(task, curr_addr, curr_size, MATTR_CACHE, &mattr_value);
+                if (kern_res != 0) {
+                    log.err("vm_machine_attribute failed with error: {d}", .{kern_res});
+                    return error.VmMachineAttributeFailed;
+                }
+            },
+            .x86_64 => {},
+            else => unreachable,
+        }
+
+        out_buf = out_buf[curr_size..];
+        total_written += curr_size;
+        curr_addr += curr_size;
+    }
+
+    return total_written;
 }
 
 fn vmRead(task: c.mach_port_name_t, address: u64, buf: []u8, count: usize) ![]u8 {
@@ -204,6 +274,7 @@ fn vmRead(task: c.mach_port_name_t, address: u64, buf: []u8, count: usize) ![]u8
         }
 
         out_buf = out_buf[curr_bytes_read..];
+        curr_addr += curr_bytes_read;
         total_read += curr_bytes_read;
     }
 
