@@ -8,6 +8,7 @@ const integer_t = c_int;
 const task_flavor_t = c.natural_t;
 const task_info_t = *integer_t;
 const task_name_t = c.mach_port_name_t;
+const vm_address_t = c.vm_offset_t;
 const vm_size_t = c.mach_vm_size_t;
 
 const TASK_VM_INFO = 22;
@@ -84,6 +85,7 @@ extern "c" fn task_info(
     task_info_outCnt: *c.mach_msg_type_number_t,
 ) c.kern_return_t;
 extern "c" fn _host_page_size(task: c.mach_port_t, size: *vm_size_t) c.kern_return_t;
+extern "c" fn vm_deallocate(target_task: c.vm_map_t, address: vm_address_t, size: vm_size_t) c.kern_return_t;
 
 const errno = c.getErrno;
 
@@ -158,17 +160,11 @@ pub fn main() anyerror!void {
             log.info("page_size = {}", .{page_size});
 
             const address: c.mach_vm_address_t = 0x100052030;
-            // var buf: u64 = undefined;
-            // var count: c_uint = 0;
+            var buf: [8]u8 = undefined;
+            const rr = try vmRead(port, address, &buf, buf.len);
+            log.info("{x}, {x}", .{ std.fmt.fmtSliceHexLower(rr), mem.readIntLittle(u64, &buf) });
 
-            // kern_res = c.mach_vm_read(port, address, 8, &buf, &count);
-            // if (kern_res == 0) {
-            //     log.warn("{x}, count = {}", .{ buf, count });
-            // } else {
-            //     return error.MachVMReadFailed;
-            // }
-
-            const swap_addr: u64 = 0x100001088;
+            const swap_addr: u64 = 0x100001082;
             var tbuf: [8]u8 = undefined;
             mem.writeIntLittle(u64, &tbuf, swap_addr);
             kern_res = c.mach_vm_write(port, address, @ptrToInt(&tbuf), 8);
@@ -185,18 +181,46 @@ pub fn main() anyerror!void {
     }
 }
 
-// fn vmRead(task: c.mach_port_name_t, address: u64, buf: []u8, count: usize) ![]u8 {
-//     var total_read: usize = 0;
-//     var curr_addr = address;
+fn vmRead(task: c.mach_port_name_t, address: u64, buf: []u8, count: usize) ![]u8 {
+    var total_read: usize = 0;
+    var curr_addr = address;
+    const page_size = try pageSize(task);
+    var out_buf = buf[0..];
 
-//     while (total_read < count) {
+    while (total_read < count) {
+        const curr_size = maxBytesLeftInPage(page_size, curr_addr, count - total_read);
+        var curr_bytes_read: c.mach_msg_type_number_t = 0;
+        var vm_memory: c.vm_offset_t = undefined;
+        var kern_res = c.mach_vm_read(task, curr_addr, curr_size, &vm_memory, &curr_bytes_read);
+        if (kern_res != 0) {
+            log.err("mach_vm_read failed with error: {d}", .{kern_res});
+            return error.MachVmReadFailed;
+        }
 
-//     }
-// }
+        @memcpy(out_buf[0..].ptr, @intToPtr([*]const u8, vm_memory), curr_bytes_read);
+        kern_res = vm_deallocate(c.mach_task_self(), vm_memory, curr_bytes_read);
+        if (kern_res != 0) {
+            log.err("vm_deallocate failed with error: {d}", .{kern_res});
+        }
 
-// fn maxBytesLeftInPage(task: c.mach_port_name_t, address: u64, count: usize) usize {
+        out_buf = out_buf[curr_bytes_read..];
+        total_read += curr_bytes_read;
+    }
 
-// }
+    return buf[0..total_read];
+}
+
+fn maxBytesLeftInPage(page_size: usize, address: u64, count: usize) usize {
+    var left = count;
+    if (page_size > 0) {
+        const page_offset = address % page_size;
+        const bytes_left_in_page = page_size - page_offset;
+        if (count > bytes_left_in_page) {
+            left = bytes_left_in_page;
+        }
+    }
+    return left;
+}
 
 fn pageSize(task: c.mach_port_name_t) !usize {
     if (task != 0) {
